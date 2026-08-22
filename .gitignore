@@ -1,0 +1,6 @@
+# Contem seu CPF — nunca versionar.
+config.ini
+
+__pycache__/
+*.pyc
+.env

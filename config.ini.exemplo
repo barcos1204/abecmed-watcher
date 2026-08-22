@@ -1,0 +1,10 @@
+# Copie para config.ini e preencha, ou rode ./configurar.sh (configurar.bat no Windows).
+
+[abecmed]
+cpf = 00000000000
+topico = abecmed-troque-isto
+
+# Intervalo entre verificacoes no modo --loop, em minutos.
+# O programa sorteia um valor aleatorio entre os dois a cada ciclo.
+intervalo_min = 7
+intervalo_max = 12

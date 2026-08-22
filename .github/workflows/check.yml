@@ -1,0 +1,46 @@
+name: check
+
+on:
+  schedule:
+    # A cada 10 min. O cron do Actions nao aceita intervalo sorteado, entao o
+    # jitter abaixo espalha o horario. Para intervalo aleatorio de verdade,
+    # use ./run.sh --loop numa maquina sua.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: abecmed-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Espalha o horario dentro da janela de 10 min.
+      - name: Jitter
+        run: sleep $((RANDOM % 300))
+
+      - name: Rodar
+        env:
+          ABECMED_CPF: ${{ secrets.ABECMED_CPF }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 bot.py
+
+      - name: Salvar estado
+        run: |
+          if [ -n "$(git status --porcelain estado.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add estado.json
+            git commit -m "estado: $(date -u +%Y-%m-%dT%H:%MZ)"
+            git push
+          fi
