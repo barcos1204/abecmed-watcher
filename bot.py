@@ -183,6 +183,10 @@ class Chat:
     def text(self):
         return messages_to_text(self.last.get("messages", []))
 
+    @property
+    def client_side_actions(self):
+        return self.last.get("clientSideActions") or []
+
     def send(self, text):
         self.last = post_json(
             "%s/api/v1/sessions/%s/continueChat" % (BASE, self.session_id),
@@ -190,6 +194,30 @@ class Chat:
             headers={"Origin": BASE, "Referer": BASE + "/"},
         )
         return self.last
+
+    def continue_without_message(self):
+        """Retoma o fluxo depois de uma acao automatica executada no navegador."""
+        self.last = post_json(
+            "%s/api/v1/sessions/%s/continueChat" % (BASE, self.session_id),
+            {},
+            headers={"Origin": BASE, "Referer": BASE + "/"},
+        )
+        return self.last
+
+    def resume_wait(self):
+        """Executa uma espera do Typebot que exige uma resposta vazia do cliente."""
+        for action in self.client_side_actions:
+            if action.get("type") != "wait" or not action.get("expectsDedicatedReply"):
+                continue
+            wait = action.get("wait") or {}
+            try:
+                seconds = float(wait.get("secondsToWaitFor", 0))
+            except (TypeError, ValueError):
+                seconds = 0
+            time.sleep(min(max(seconds, 0), 10))
+            self.continue_without_message()
+            return True
+        return False
 
     def pick(self, pattern, required=True):
         """Escolhe a opcao cujo texto casa com o regex. Devolve o texto escolhido."""
@@ -216,12 +244,20 @@ def reach_menu(chat, max_hops=5):
     for _ in range(max_hops):
         if any(MENU_HINT.search(i) for i in chat.items):
             return
+        # O navegador executa automaticamente blocos "wait" e depois chama
+        # continueChat sem mensagem. O fluxo atual usa isso logo apos o CPF.
+        if chat.resume_wait():
+            continue
         if chat.pick(GO_ON.pattern, required=False):
             continue
         if len(chat.items) == 1:  # tela de "ok" com nome diferente
             chat.send(chat.items[0])
             continue
-        raise FlowError("nao cheguei no menu — opcoes: %r" % (chat.items,))
+        action_types = [a.get("type") for a in chat.client_side_actions]
+        raise FlowError(
+            "nao cheguei no menu — tipo: %r, acoes: %r, opcoes: %r"
+            % (chat.input_type, action_types, chat.items)
+        )
     raise FlowError("nao cheguei no menu depois de %d telas" % max_hops)
 
 
