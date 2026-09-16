@@ -227,7 +227,7 @@ def reach_menu(chat, max_hops=5):
 
 def format_cpf(cpf):
     """Formata os 11 digitos como o campo atual do Typebot exige."""
-    digits = re.sub(r"\\D", "", cpf)
+    digits = re.sub(r"\D", "", cpf)
     if len(digits) != 11:
         raise ValueError("CPF deve ter 11 digitos")
     return "%s.%s.%s-%s" % (digits[:3], digits[3:6], digits[6:9], digits[9:])
