@@ -225,6 +225,14 @@ def reach_menu(chat, max_hops=5):
     raise FlowError("nao cheguei no menu depois de %d telas" % max_hops)
 
 
+def format_cpf(cpf):
+    """Formata os 11 digitos como o campo atual do Typebot exige."""
+    digits = re.sub(r"\\D", "", cpf)
+    if len(digits) != 11:
+        raise ValueError("CPF deve ter 11 digitos")
+    return "%s.%s.%s-%s" % (digits[:3], digits[3:6], digits[6:9], digits[9:])
+
+
 def collect(cpf):
     """Percorre o fluxo e devolve o relatorio em texto."""
     chat = Chat()
@@ -234,7 +242,8 @@ def collect(cpf):
 
     if chat.input_type != "text input":
         raise FlowError("esperava campo de CPF, veio %r" % (chat.input_type,))
-    chat.send(cpf)
+    # Em setembro/2026 o bot passou a rejeitar o CPF sem pontuacao.
+    chat.send(format_cpf(cpf))
 
     reach_menu(chat)
     sections.append(("MENU", "", chat.items))
