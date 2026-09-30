@@ -35,7 +35,9 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 BASE = "https://bot.abecmed.com.br"
-TYPEBOT = "pix-pagamento"
+# Identificador atual do bot. O site e consultado antes de cada conversa para
+# descobrir automaticamente um novo publicId caso a ABECMED publique outra versao.
+TYPEBOT = "bot-abecmed-2-1"
 NTFY_BASE = "https://ntfy.sh"
 
 # Cabecalhos identicos aos que o Firefox manda nesse site. Alem de evitar
@@ -109,6 +111,48 @@ def post_json(url, payload, headers=None):
     raise FlowError("falhou apos %d tentativas em %s: %s" % (RETRIES, url, last_error))
 
 
+def get_text(url, headers=None):
+    """Baixa uma pagina de texto usando os mesmos cabecalhos do navegador."""
+    base_headers = dict(BROWSER_HEADERS)
+    base_headers.update(headers or {})
+    base_headers.pop("Content-Type", None)
+
+    last_error = None
+    for attempt in range(RETRIES):
+        req = urllib.request.Request(url, method="GET", headers=base_headers)
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                raw = resp.read()
+                if resp.headers.get("Content-Encoding") == "gzip":
+                    raw = gzip.decompress(raw)
+                return raw.decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code < 500:
+                raise FlowError("HTTP %s em %s" % (exc.code, url)) from exc
+        except Exception as exc:
+            last_error = exc
+        if attempt < RETRIES - 1:
+            time.sleep(2 ** attempt)
+
+    raise FlowError("falhou apos %d tentativas em %s: %s" % (RETRIES, url, last_error))
+
+
+def discover_typebot():
+    """Descobre o publicId publicado na pagina, com fallback para o atual."""
+    configured = os.environ.get("ABECMED_TYPEBOT", "").strip()
+    if configured:
+        return configured
+
+    try:
+        page = get_text(BASE + "/")
+    except FlowError:
+        return TYPEBOT
+
+    match = re.search(r'"publicId"\s*:\s*"([a-zA-Z0-9_-]+)"', page)
+    return match.group(1) if match else TYPEBOT
+
+
 # ------------------------------------------------------- richText -> texto
 
 
@@ -161,8 +205,9 @@ def tidy(text):
 
 class Chat:
     def __init__(self):
+        public_id = discover_typebot()
         self.last = post_json(
-            "%s/api/v1/typebots/%s/startChat" % (BASE, TYPEBOT),
+            "%s/api/v1/typebots/%s/startChat" % (BASE, public_id),
             {"isStreamEnabled": False, "prefilledVariables": {}, "isOnlyRegistering": False},
             headers={"Origin": BASE, "Referer": BASE + "/"},
         )
