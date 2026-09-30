@@ -295,6 +295,12 @@ def collect(cpf):
 
     # --- flores
     chat.pick(r"flor")
+
+    # O BOT ABECMED 2.1 adicionou uma etapa de composto antes do catalogo.
+    # So depois de escolher THC as strains disponiveis sao exibidas.
+    if any(re.search(r"\bTHC\b", i, re.I) for i in chat.items):
+        chat.pick(r"\bTHC\b")
+
     sections.append(("FLORES", chat.text, chat.items))
     chat.pick(r"voltar|in[íi]cio", required=False)
 
