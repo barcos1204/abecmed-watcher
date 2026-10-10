@@ -253,7 +253,25 @@ class Chat:
 # ----------------------------------------------------------------- fluxo
 
 MENU_HINT = re.compile(r"flor|concentrad|[óo]leo", re.I)
-GO_ON = re.compile(r"ciente|entendi|continuar|prosseguir|ok", re.I)
+PATIENT_HINT = re.compile(r"\bpaciente\b", re.I)
+GO_ON = re.compile(
+    r"\bciente\b|\bentendi\b|continuar|prosseguir|avan[çc]ar|come[çc]ar|^ok$",
+    re.I,
+)
+
+
+def reach_patient(chat, max_hops=5):
+    """Avanca por comunicados ate aparecer a opcao de paciente."""
+    for _ in range(max_hops):
+        if any(PATIENT_HINT.search(i) for i in chat.items):
+            return
+        if chat.pick(GO_ON.pattern, required=False):
+            continue
+        if len(chat.items) == 1:
+            chat.send(chat.items[0])
+            continue
+        raise FlowError("nao cheguei na entrada de paciente — opcoes: %r" % (chat.items,))
+    raise FlowError("nao cheguei na entrada de paciente depois de %d telas" % max_hops)
 
 
 def reach_menu(chat, max_hops=5):
@@ -283,6 +301,7 @@ def collect(cpf):
     chat = Chat()
     sections = []
 
+    reach_patient(chat)
     chat.pick(r"paciente")
 
     if chat.input_type != "text input":
