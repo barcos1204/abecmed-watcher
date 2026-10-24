@@ -390,6 +390,53 @@ def added_lines(old, new):
     ]
 
 
+def section_options(report, title):
+    """Extrai as opcoes de uma secao renderizada do relatorio."""
+    header = "== %s ==" % title
+    inside = False
+    for line in report.splitlines():
+        if line.startswith("== "):
+            inside = line == header
+            continue
+        if inside and line.startswith("opcoes: "):
+            return [item.strip() for item in line[8:].split(" | ") if item.strip()]
+    return []
+
+
+def catalog_changes(old, new):
+    """Devolve produtos que entraram e sairam, preservando a ordem do catalogo."""
+    old_items = section_options(old, "FLORES")
+    new_items = section_options(new, "FLORES")
+    old_set = set(old_items)
+    new_set = set(new_items)
+    added = [item for item in new_items if item not in old_set]
+    removed = [item for item in old_items if item not in new_set]
+    return added, removed
+
+
+def strike(text):
+    """Aplica risco Unicode, compativel inclusive com clientes sem Markdown GFM."""
+    return "".join(char + "\u0336" if not char.isspace() else char for char in text)
+
+
+def change_highlight(old, new):
+    """Monta o destaque Markdown das strains que entraram e sairam."""
+    added, removed = catalog_changes(old, new)
+    if not added and not removed:
+        return ""
+
+    lines = ["**Alterações nas strains:**"]
+    if added:
+        lines.append("")
+        lines.append("**Entrou:**")
+        lines.extend("- **%s**" % item for item in added)
+    if removed:
+        lines.append("")
+        lines.append("**Saiu:**")
+        lines.extend("- %s" % strike(item) for item in removed)
+    return "\n".join(lines) + "\n\n"
+
+
 # ------------------------------------------------------------ notificacao
 
 
@@ -400,6 +447,7 @@ def notify(topic, title, message, tags):
         "title": title,
         "message": message[:MAX_MSG],
         "tags": tags,
+        "markdown": True,
     }
     post_json(
         NTFY_BASE,
@@ -451,8 +499,10 @@ def ciclo(cpf, topic, state_path, avisou_quebra):
         body = "Primeira execucao. Catalogo atual:\n\n%s" % report
         tags = ["seedling"]
     else:
-        novos = added_lines(previous, report)
-        destaque = "Novidades:\n" + "\n".join(novos) + "\n\n" if novos else ""
+        destaque = change_highlight(previous, report)
+        if not destaque:
+            novos = added_lines(previous, report)
+            destaque = "Novidades:\n" + "\n".join(novos) + "\n\n" if novos else ""
         title = "ABECMED mudou"
         body = "%s%s" % (destaque, report)
         tags = ["bell"]
