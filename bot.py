@@ -403,6 +403,30 @@ def section_options(report, title):
     return []
 
 
+def normalize_flower_order(report):
+    """Normaliza somente a ordem das opcoes da secao FLORES."""
+    header = "== FLORES =="
+    inside = False
+    lines = []
+    for line in report.splitlines():
+        if line.startswith("== "):
+            inside = line == header
+        if inside and line.startswith("opcoes: "):
+            items = [item.strip() for item in line[8:].split(" | ") if item.strip()]
+            line = "opcoes: " + " | ".join(sorted(items))
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def only_flower_order_changed(old, new):
+    """Indica que o relatorio mudou apenas porque as flores foram reordenadas."""
+    old_items = section_options(old, "FLORES")
+    new_items = section_options(new, "FLORES")
+    if not old_items or not new_items:
+        return False
+    return normalize_flower_order(old) == normalize_flower_order(new)
+
+
 def catalog_changes(old, new):
     """Devolve produtos que entraram e sairam, preservando a ordem do catalogo."""
     old_items = section_options(old, "FLORES")
@@ -494,17 +518,27 @@ def ciclo(cpf, topic, state_path, avisou_quebra):
         print("%s  sem mudancas" % time.strftime("%H:%M"))
         return False
 
+    if previous and only_flower_order_changed(previous, report):
+        # O Typebot pode devolver os mesmos produtos em outra ordem. Atualizamos o
+        # estado para acompanhar a ordem atual, mas isso nao e uma novidade real.
+        save_state(state_path, report)
+        print("%s  sem mudancas (somente ordem das strains)" % time.strftime("%H:%M"))
+        return False
+
     if not previous:
         title = "abecmed-watch ativo"
         body = "Primeira execucao. Catalogo atual:\n\n%s" % report
         tags = ["seedling"]
     else:
         destaque = change_highlight(previous, report)
-        if not destaque:
+        if destaque:
+            # Para alteracoes reais no catalogo, mostra somente o que entrou/saiu.
+            body = destaque.rstrip()
+        else:
             novos = added_lines(previous, report)
             destaque = "Novidades:\n" + "\n".join(novos) + "\n\n" if novos else ""
+            body = "%s%s" % (destaque, report)
         title = "ABECMED mudou"
-        body = "%s%s" % (destaque, report)
         tags = ["bell"]
 
     notify(topic, title, body, tags)
