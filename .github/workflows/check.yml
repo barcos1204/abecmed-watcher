@@ -7,6 +7,12 @@ on:
     # use ./run.sh --loop numa maquina sua.
     - cron: "*/10 * * * *"
   workflow_dispatch:
+    inputs:
+      notify_current:
+        description: "Enviar o estoque atual ao ntfy"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: abecmed-watch
@@ -27,13 +33,19 @@ jobs:
 
       # Espalha o horario dentro da janela de 10 min.
       - name: Jitter
+        if: github.event_name == 'schedule'
         run: sleep $((RANDOM % 300))
 
       - name: Rodar
         env:
           ABECMED_CPF: ${{ secrets.ABECMED_CPF }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-        run: python3 bot.py
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.notify_current }}" = "true" ]; then
+            python3 bot.py --notify-current
+          else
+            python3 bot.py
+          fi
 
       - name: Salvar estado
         run: |
