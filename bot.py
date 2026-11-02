@@ -444,21 +444,32 @@ def strike(text):
 
 
 def change_highlight(old, new):
-    """Monta o destaque Markdown das strains que entraram e sairam."""
+    """Monta a lista atual, destacando a mudanca mais recente do catalogo."""
     added, removed = catalog_changes(old, new)
     if not added and not removed:
         return ""
 
-    lines = ["**Alterações nas strains:**"]
-    if added:
-        lines.append("")
-        lines.append("**Entrou:**")
-        lines.extend("- **%s**" % item for item in added)
+    current = section_options(new, "FLORES")
+    added_set = set(added)
+    lines = ["**Lista atualizada de strains:**", ""]
+    for item in current:
+        if item in added_set:
+            lines.append("- **%s**" % item)
+        else:
+            lines.append("- %s" % item)
+
     if removed:
         lines.append("")
-        lines.append("**Saiu:**")
+        lines.append("**Saiu do estoque:**")
         lines.extend("- %s" % strike(item) for item in removed)
-    return "\n".join(lines) + "\n\n"
+
+    lines.extend(
+        [
+            "",
+            "_Novas em negrito; removidas riscadas até a próxima atualização._",
+        ]
+    )
+    return "\n".join(lines)
 
 
 # ------------------------------------------------------------ notificacao
