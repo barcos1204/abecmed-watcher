@@ -472,6 +472,16 @@ def change_highlight(old, new):
     return "\n".join(lines)
 
 
+def current_catalog_message(report):
+    """Monta uma mensagem com o estoque atual, sem alterar o estado salvo."""
+    items = section_options(report, "FLORES")
+    if not items:
+        raise FlowError("o catalogo atual nao trouxe nenhuma strain")
+    return "\n".join(
+        ["**Estoque atual de strains:**", ""] + ["- %s" % item for item in items]
+    )
+
+
 # ------------------------------------------------------------ notificacao
 
 
@@ -570,6 +580,11 @@ def main():
         "--dry-run", action="store_true", help="imprime o relatorio, nao notifica nem salva"
     )
     parser.add_argument(
+        "--notify-current",
+        action="store_true",
+        help="envia o estoque atual ao ntfy sem alterar o estado salvo",
+    )
+    parser.add_argument(
         "--loop",
         action="store_true",
         help="fica rodando, com intervalo sorteado entre cada verificacao",
@@ -611,6 +626,16 @@ def main():
             print(collect(cpf))
         except FlowError as exc:
             sys.exit("FALHA: %s" % exc)
+        return
+
+    if args.notify_current:
+        try:
+            report = collect(cpf)
+            body = current_catalog_message(report)
+            notify(topic, "Estoque atual ABECMED", body, ["herb"])
+        except FlowError as exc:
+            sys.exit("FALHA: %s" % exc)
+        print("%s  estoque atual enviado" % time.strftime("%H:%M"))
         return
 
     if not args.loop:
