@@ -7,8 +7,8 @@ de conversa como se fosse um navegador, junta o texto das telas de
 produto num relatorio, e compara com a execucao anterior. Se mudou,
 notifica via ntfy.sh.
 
-Nao faz parsing de produto/preco de proposito: compara o texto inteiro.
-Menos coisa pra quebrar quando a ABECMED mexer no fluxo.
+Compara as opcoes de flores sem interpretar nome/preco. Mudancas apenas
+na ordem das strains nao geram notificacao.
 
 Configuracao, em ordem de prioridade:
     1. variaveis de ambiente ABECMED_CPF e NTFY_TOPIC (usado no GitHub Actions)
@@ -21,13 +21,13 @@ Uso:
 
 import argparse
 import configparser
-import difflib
 import gzip
 import json
 import os
 import random
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -69,7 +69,7 @@ INTERVALO_MAX = 12
 # Blocos do richText que viram quebra de linha no texto plano.
 BLOCK_TYPES = {"p", "ul", "ol", "li", "h1", "h2", "h3", "blockquote"}
 
-# Limite de mensagem do ntfy (4096 bytes). Deixo folga.
+# Orcamento por mensagem em bytes UTF-8, com folga para o limite do ntfy.
 MAX_MSG = 3500
 
 
@@ -365,29 +365,40 @@ def load_config(path):
 def load_state(path):
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
+            state = json.load(fh)
+    except FileNotFoundError:
         return {}
+    except (OSError, ValueError) as exc:
+        raise FlowError("nao foi possivel ler o estado; arquivo preservado") from exc
+    if (
+        not isinstance(state, dict)
+        or not isinstance(state.get("report", ""), str)
+        or not isinstance(state.get("failure_notified", False), bool)
+    ):
+        raise FlowError("estado invalido; arquivo preservado")
+    return state
 
 
-def save_state(path, report):
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(
-            {"report": report, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
-            fh,
-            ensure_ascii=False,
-            indent=1,
-        )
-        fh.write("\n")
-
-
-def added_lines(old, new):
-    diff = difflib.unified_diff(old.splitlines(), new.splitlines(), n=0, lineterm="")
-    return [
-        ln[1:].strip()
-        for ln in diff
-        if ln.startswith("+") and not ln.startswith("+++") and ln[1:].strip()
-    ]
+def save_state(path, state):
+    """Substitui o JSON atomicamente; uma escrita incompleta nao apaga o anterior."""
+    updated = dict(state, updated_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=os.path.dirname(os.path.abspath(path)),
+            prefix=".estado-", suffix=".tmp", delete=False,
+        ) as fh:
+            temporary = fh.name
+            json.dump(updated, fh, ensure_ascii=False, indent=1)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise FlowError("nao foi possivel salvar o estado") from exc
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def section_options(report, title):
@@ -438,37 +449,23 @@ def catalog_changes(old, new):
     return added, removed
 
 
-def strike(text):
-    """Aplica risco Unicode, compativel inclusive com clientes sem Markdown GFM."""
-    return "".join(char + "\u0336" if not char.isspace() else char for char in text)
-
-
 def change_highlight(old, new):
-    """Monta a lista atual, destacando a mudanca mais recente do catalogo."""
+    """Tres grupos sem duplicatas, relativos somente a ultima mudanca."""
     added, removed = catalog_changes(old, new)
-    if not added and not removed:
-        return ""
-
-    current = section_options(new, "FLORES")
     added_set = set(added)
-    lines = ["**Lista atualizada de strains:**", ""]
-    for item in current:
-        if item in added_set:
-            lines.append("- **%s**" % item)
-        else:
-            lines.append("- %s" % item)
-
-    if removed:
-        lines.append("")
-        lines.append("**Saiu do estoque:**")
-        lines.extend("- %s" % strike(item) for item in removed)
-
-    lines.extend(
-        [
-            "",
-            "_Novas em negrito; removidas riscadas até a próxima atualização._",
-        ]
-    )
+    kept = [item for item in section_options(new, "FLORES") if item not in added_set]
+    lines = []
+    for title, items in (
+        ("Novidades:", added),
+        ("Em estoque:", kept),
+        ("Sem estoque:", removed),
+    ):
+        if lines:
+            lines.append("")
+        lines.append(title)
+        lines.extend("- %s" % item for item in dict.fromkeys(items))
+        if not items:
+            lines.append("- Nenhuma.")
     return "\n".join(lines)
 
 
@@ -478,62 +475,108 @@ def current_catalog_message(report):
     if not items:
         raise FlowError("o catalogo atual nao trouxe nenhuma strain")
     return "\n".join(
-        ["**Estoque atual de strains:**", ""] + ["- %s" % item for item in items]
+        ["Estoque atual de strains:", ""]
+        + ["- %s" % item for item in dict.fromkeys(items)]
     )
 
 
 # ------------------------------------------------------------ notificacao
 
 
+def message_parts(message, limit=MAX_MSG):
+    """Divide por linhas e, se necessario, caracteres; nunca corta bytes UTF-8."""
+    if limit < 4:
+        raise ValueError("o limite deve comportar qualquer caractere UTF-8")
+    if not message.strip():
+        raise FlowError("notificacao vazia")
+    parts = []
+    current = []
+    size = 0
+    for line in message.splitlines(keepends=True):
+        line_size = len(line.encode("utf-8"))
+        if current and size + line_size > limit:
+            parts.append("".join(current))
+            current, size = [], 0
+        if line_size <= limit:
+            current.append(line)
+            size += line_size
+            continue
+        for char in line:
+            char_size = len(char.encode("utf-8"))
+            if size + char_size > limit:
+                parts.append("".join(current))
+                current, size = [], 0
+            current.append(char)
+            size += char_size
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
 def notify(topic, title, message, tags):
-    """ntfy e outro servico: nao herda o disfarce de navegador."""
-    payload = {
-        "topic": topic,
-        "title": title,
-        "message": message[:MAX_MSG],
-        "tags": tags,
-        "markdown": True,
-    }
-    post_json(
-        NTFY_BASE,
-        payload,
-        headers={
-            "User-Agent": "abecmed-watch",
-            "Origin": None,
-            "Referer": None,
-            "Sec-Fetch-Dest": None,
-            "Sec-Fetch-Mode": None,
-            "Sec-Fetch-Site": None,
-        },
-    )
+    """Publica texto simples e confirma o aceite de cada parte pelo servidor."""
+    # Uma quebra de linha isolada no limite nao deve virar um aviso vazio.
+    parts = [part for part in message_parts(message) if part.strip()]
+    ids = []
+    for number, part in enumerate(parts, 1):
+        part_title = title if len(parts) == 1 else "%s (%d/%d)" % (title, number, len(parts))
+        response = post_json(
+            NTFY_BASE,
+            {"topic": topic, "title": part_title, "message": part, "tags": tags},
+            headers={
+                "User-Agent": "abecmed-watch",
+                "Origin": None,
+                "Referer": None,
+                "Sec-Fetch-Dest": None,
+                "Sec-Fetch-Mode": None,
+                "Sec-Fetch-Site": None,
+            },
+        )
+        if (
+            not isinstance(response, dict)
+            or response.get("event") != "message"
+            or response.get("topic") != topic
+            or not isinstance(response.get("id"), str)
+            or not response["id"]
+        ):
+            raise FlowError("ntfy nao confirmou o aceite da parte %d/%d" % (number, len(parts)))
+        ids.append(response["id"])
+        # Nao registra o topico nem o CPF. Aceite nao comprova entrega no celular.
+        print("ntfy: parte %d/%d aceita; id=%r" % (number, len(parts), response["id"]))
+    return ids
 
 
 # ------------------------------------------------------------------ main
 
 
-def ciclo(cpf, topic, state_path, avisou_quebra):
-    """Um ciclo completo. Devolve o novo valor de avisou_quebra."""
+def ciclo(cpf, topic, state_path):
+    """Um ciclo completo. True indica falha; o controle de avisos fica no JSON."""
+    state = load_state(state_path)
+    previous = state.get("report", "")
     try:
         report = collect(cpf)
+        # Uma tela incompleta nao pode virar uma falsa remocao de todo o estoque.
+        current_catalog_message(report)
     except FlowError as exc:
         print("FALHA: %s" % exc, file=sys.stderr)
-        # So avisa na primeira falha da sequencia: senao vira spam a cada 9 min.
-        if topic and not avisou_quebra:
+        if topic and not state.get("failure_notified", False):
             notify(
                 topic,
                 "abecmed-watch quebrou",
-                "O fluxo do bot mudou e o script nao conseguiu navegar.\n\n%s" % exc,
+                "Nao foi possivel consultar o catalogo. Pode ser uma falha temporaria "
+                "ou uma mudanca no fluxo.\n\n%s" % exc,
                 ["warning"],
             )
+            state["failure_notified"] = True
+            save_state(state_path, state)
         return True
 
-    if avisou_quebra:
+    if state.get("failure_notified", False):
         print("voltou a funcionar")
         if topic:
             notify(topic, "abecmed-watch voltou", "Navegacao normalizada.", ["white_check_mark"])
-
-    state = load_state(state_path)
-    previous = state.get("report", "")
+        state["failure_notified"] = False
+        save_state(state_path, state)
 
     if report == previous:
         print("%s  sem mudancas" % time.strftime("%H:%M"))
@@ -542,29 +585,29 @@ def ciclo(cpf, topic, state_path, avisou_quebra):
     if previous and only_flower_order_changed(previous, report):
         # O Typebot pode devolver os mesmos produtos em outra ordem. Atualizamos o
         # estado para acompanhar a ordem atual, mas isso nao e uma novidade real.
-        save_state(state_path, report)
+        state["report"] = report
+        save_state(state_path, state)
         print("%s  sem mudancas (somente ordem das strains)" % time.strftime("%H:%M"))
         return False
 
     if not previous:
         title = "abecmed-watch ativo"
-        body = "Primeira execucao. Catalogo atual:\n\n%s" % report
+        body = "Primeira execucao, sem comparacao anterior.\n\n" + current_catalog_message(report)
         tags = ["seedling"]
     else:
-        destaque = change_highlight(previous, report)
-        if destaque:
-            # Para alteracoes reais no catalogo, mostra somente o que entrou/saiu.
-            body = destaque.rstrip()
-        else:
-            novos = added_lines(previous, report)
-            destaque = "Novidades:\n" + "\n".join(novos) + "\n\n" if novos else ""
-            body = "%s%s" % (destaque, report)
+        body = change_highlight(previous, report)
+        if not any(catalog_changes(previous, report)):
+            body = (
+                "Mudou o texto ou outra secao do catalogo; as strains de flores continuam iguais.\n\n"
+                + body
+            )
         title = "ABECMED mudou"
         tags = ["bell"]
 
     notify(topic, title, body, tags)
-    save_state(state_path, report)
-    print("%s  mudanca detectada, notificacao enviada" % time.strftime("%H:%M"))
+    state["report"] = report
+    save_state(state_path, state)
+    print("%s  mudanca detectada, notificacao aceita pelo ntfy" % time.strftime("%H:%M"))
     return False
 
 
@@ -576,15 +619,16 @@ def main():
     parser.add_argument(
         "--state", default=os.path.join(HERE, "estado.json"), help="arquivo de estado"
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--dry-run", action="store_true", help="imprime o relatorio, nao notifica nem salva"
     )
-    parser.add_argument(
+    modes.add_argument(
         "--notify-current",
         action="store_true",
         help="envia o estoque atual ao ntfy sem alterar o estado salvo",
     )
-    parser.add_argument(
+    modes.add_argument(
         "--loop",
         action="store_true",
         help="fica rodando, com intervalo sorteado entre cada verificacao",
@@ -635,19 +679,25 @@ def main():
             notify(topic, "Estoque atual ABECMED", body, ["herb"])
         except FlowError as exc:
             sys.exit("FALHA: %s" % exc)
-        print("%s  estoque atual enviado" % time.strftime("%H:%M"))
+        print("%s  estoque atual aceito pelo ntfy" % time.strftime("%H:%M"))
         return
 
+    def check_once():
+        try:
+            return ciclo(cpf, topic, args.state)
+        except FlowError as exc:
+            print("FALHA: %s" % exc, file=sys.stderr)
+            return True
+
     if not args.loop:
-        quebrou = ciclo(cpf, topic, args.state, False)
+        quebrou = check_once()
         sys.exit(1 if quebrou else 0)
 
     print("Monitorando. Intervalo sorteado entre %d e %d minutos." % (lo, hi))
     print("Para parar, aperte Ctrl+C.\n")
-    avisou_quebra = False
     try:
         while True:
-            avisou_quebra = ciclo(cpf, topic, args.state, avisou_quebra)
+            check_once()
             espera = random.uniform(lo * 60, hi * 60)
             print("   proxima verificacao em %d min %02d s" % divmod(int(espera), 60)[0:2])
             time.sleep(espera)
