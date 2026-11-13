@@ -69,10 +69,39 @@ Sem servidor, sem deixar o PC ligado:
    (sem isso falha com 403).
 4. Aba **Actions**, habilite e rode `check` uma vez à mão.
 
-O workflow `check` funciona na branch `main`. Está agendado a cada 10 minutos,
-com uma espera aleatória de até 5 minutos antes da consulta. O GitHub pode
-atrasar execuções: isso não é uma garantia de horário ou de monitoramento
-contínuo. O modo local `--loop` sorteia seu próprio intervalo.
+O workflow `check` funciona na branch `main`. Solicita uma execução nos minutos
+7, 17, 27, 37, 47 e 57 de cada hora, sem espera aleatória adicional. Esse
+deslocamento evita o início da hora, uma mitigação recomendada pelo GitHub
+para reduzir atrasos. Não garante execução a cada 10 minutos: o GitHub pode
+atrasar ou descartar disparos. O modo local `--loop` mantém seu intervalo sorteado.
+
+### Diagnóstico de frequência
+
+O resumo de cada execução agendada mostra o intervalo entre a criação do run
+atual e do anterior do mesmo workflow na `main`. Acima de 30 minutos, registra
+um aviso no Actions. A consulta usa a API do GitHub apenas para leitura, com
+`actions: read`; não precisa de novo secret ou serviço. Uma falha nesse
+diagnóstico não impede o monitor de consultar e notificar o estoque.
+
+Isso mede **disparos registrados**, não confirma coleta ou entrega no celular.
+Execuções manuais não são usadas para esconder lacunas do cron. Não usa
+`updated_at` do estado como horário da última consulta, pois o estoque pode
+ficar igual por várias rodadas. Não envia aviso extra ao ntfy.
+
+Limitação: o diagnóstico só acontece quando o próprio workflow executa. Não é
+um monitor independente e não avisa durante uma parada total. Para garantia
+mais forte de frequência, seria necessário avaliar um agendador externo ou
+uma máquina sempre ligada; nenhum serviço externo foi ativado por este ajuste.
+
+Na revisão de **12/11/2026**, os runs consecutivos
+[538](https://github.com/barcos1204/abecmed-watcher/actions/runs/43198128264),
+[539](https://github.com/barcos1204/abecmed-watcher/actions/runs/43279620874) e
+[540](https://github.com/barcos1204/abecmed-watcher/actions/runs/43331862342)
+foram criados às 07:11, 15:25 e 20:48 (Brasília). Terminaram com sucesso em menos
+de cinco minutos cada. Esses registros mostram lacunas entre disparos, não uma
+consulta Python travada por horas; não identificam a causa interna no GitHub.
+A mudança do cron e a remoção do jitter são mitigação, não correção comprovada
+dessas lacunas. Referência: [documentação de agendamentos do GitHub](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
 
 ### Receber o estoque atual agora
 
@@ -94,6 +123,7 @@ Novidades:
 
 Em estoque:
 - Strain B
+- Strain D (indoor) — preço: R$ 85 → R$ 90
 
 Sem estoque:
 - Strain A
@@ -102,6 +132,10 @@ Sem estoque:
 - **Novidades:** opções que não estavam na consulta anterior e estão agora.
 - **Em estoque:** opções que continuam disponíveis; as novidades não se repetem aqui.
 - **Sem estoque:** opções que estavam antes e acabaram de sair.
+
+Uma mudança apenas de preço aparece em **Em estoque**, com valor anterior e
+novo; não é tratada como entrada ou saída. Esse destaque vale para a última
+mudança detectada. O envio manual mostra somente os preços atuais.
 
 Cada seção sem itens mostra `- Nenhuma.`. As entradas e saídas se referem à
 última mudança detectada, não a um histórico acumulado. As notificações antigas
@@ -118,15 +152,32 @@ paciente → CPF → menu → flores → THC, quando essa escolha existe. També
 consulta concentrados/óleo quando esse ramo está disponível. Compara o relatório
 com a rodada anterior (`estado.json`).
 
-Não interpreta nome nem preço: cada opção é comparada pelo texto completo.
-Por isso, uma troca de preço ou de nome aparece como saída do texto antigo e
-entrada do novo. Só mudar a ordem das flores não gera aviso. Uma alteração no
-texto ou em outra seção ainda gera um aviso, mas informa que as opções de
-flores continuam iguais, sem repetir menus e instruções no corpo da mensagem.
+Reconhece opções no formato `[R$ 85] — Nome da strain (variante)`, separando
+preço de identidade. A identidade mantém o nome completo e seus qualificadores:
+indoor, outdoor e flores pequenas não são agrupados como o mesmo produto.
+Uma renomeação real ainda pode aparecer como saída e entrada, pois não há um
+identificador estável de produto exposto nesse formato.
+
+Preços são comparados em centavos inteiros. Mudanças apenas de ordem, espaços,
+maiúsculas/minúsculas ou formatação equivalente de preço não geram aviso.
+Uma alteração no texto ou em outra seção ainda gera um aviso, informando que
+as opções de flores continuam iguais, sem repetir menus e instruções.
+
+Botões conhecidos como `THC`, `CBD`, `Voltar` e `Menu principal` não entram na
+lista. Uma tela só de menu, opção desconhecida ou mesma strain/variante com
+preços conflitantes invalida a consulta inteira; não se descarta um possível
+produto silenciosamente. A etapa THC só seleciona o botão da categoria, não
+uma strain que contenha a palavra THC no nome.
 
 Uma resposta sem opções de flores é tratada conservadoramente como consulta
 incompleta, não como prova de que tudo esgotou. Nesse caso, mantém o estoque
 anterior e pede verificação do fluxo.
+
+O formato anterior de `estado.json` continua compatível. Se a referência antiga
+contiver uma tela inválida (por exemplo, THC/Voltar), a próxima coleta válida
+envia um estoque revalidado, sem inventar entradas/saídas. A referência só é
+substituída depois que o ntfy aceita esse envio. JSON corrompido continua sendo
+preservado para diagnóstico, sem reinicialização automática.
 
 Precisa do CPF de um **associado** — é assim que o bot identifica quem está
 falando. Sem CPF válido a conversa não passa da segunda tela. As requisições
@@ -176,8 +227,9 @@ python3 -m unittest discover -s tests -v
 
 Os testes não consultam a associação nem enviam notificações: usam respostas
 simuladas e repositórios Git locais temporários. Cobrem o formato, diferenças
-de estoque, reordenação, preços, limites UTF-8, falhas/recuperação, envio manual,
-gravação atômica e concorrência ao salvar o estado. O workflow `tests` os executa
+de estoque, telas inválidas, variantes/preços, limites UTF-8, falhas/recuperação,
+envio manual, gravação atômica, concorrência ao salvar o estado e diagnóstico
+de frequência. O workflow `tests` os executa
 nos PRs, sem usar os secrets do monitor.
 
 ---

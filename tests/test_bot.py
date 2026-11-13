@@ -11,11 +11,19 @@ from unittest import mock
 import bot
 
 
-def report(*items, text="Produtos disponíveis"):
+def label(name):
+    return name if name.startswith("[R$") else "[R$ 85] — " + name
+
+
+def raw_report(*items, text="Produtos disponíveis"):
     return bot.render([
         ("MENU", "", ["Óleos", "Flores"]),
         ("FLORES", text, list(items)),
     ])
+
+
+def report(*items, text="Produtos disponíveis"):
+    return raw_report(*(label(item) for item in items), text=text)
 
 
 class OfflineTest(unittest.TestCase):
@@ -31,35 +39,38 @@ class CatalogTests(OfflineTest):
     def test_three_disjoint_plain_text_groups(self):
         message = bot.change_highlight(report("Mantida", "Saiu"), report("Nova", "Mantida"))
         self.assertEqual(message, (
-            "Novidades:\n- Nova\n\nEm estoque:\n- Mantida\n\nSem estoque:\n- Saiu"
+            "Novidades:\n- [R$ 85] — Nova\n\nEm estoque:\n- [R$ 85] — Mantida\n\nSem estoque:\n- [R$ 85] — Saiu"
         ))
         self.assertNotIn("**", message)
         self.assertNotIn("\u0336", message)
 
     def test_only_additions(self):
         self.assertEqual(bot.change_highlight(report("A"), report("A", "B")), (
-            "Novidades:\n- B\n\nEm estoque:\n- A\n\nSem estoque:\n- Nenhuma."
+            "Novidades:\n- [R$ 85] — B\n\nEm estoque:\n- [R$ 85] — A\n\nSem estoque:\n- Nenhuma."
         ))
 
     def test_only_removals(self):
         self.assertEqual(bot.change_highlight(report("A", "B"), report("A")), (
-            "Novidades:\n- Nenhuma.\n\nEm estoque:\n- A\n\nSem estoque:\n- B"
+            "Novidades:\n- Nenhuma.\n\nEm estoque:\n- [R$ 85] — A\n\nSem estoque:\n- [R$ 85] — B"
         ))
 
     def test_removals_are_not_accumulated(self):
         first, second, third = report("A", "B"), report("B", "C"), report("C", "D")
-        self.assertIn("Sem estoque:\n- A", bot.change_highlight(first, second))
-        self.assertIn("Sem estoque:\n- B", bot.change_highlight(second, third))
-        self.assertNotIn("- A", bot.change_highlight(second, third))
+        self.assertIn("Sem estoque:\n- " + label("A"), bot.change_highlight(first, second))
+        self.assertIn("Sem estoque:\n- " + label("B"), bot.change_highlight(second, third))
+        self.assertNotIn("- " + label("A"), bot.change_highlight(second, third))
 
     def test_duplicate_options_appear_once(self):
         message = bot.change_highlight(report("A", "B", "B"), report("A", "A", "C", "C"))
         for item in ("A", "B", "C"):
-            self.assertEqual(message.count("- " + item), 1)
+            self.assertEqual(message.count("- " + label(item)), 1)
 
-    def test_price_change_keeps_literal_labels(self):
+    def test_price_change_is_not_an_addition_or_removal(self):
         old, new = "[R$ 50] — A", "[R$ 55] — A"
-        self.assertEqual(bot.catalog_changes(report(old), report(new)), ([new], [old]))
+        self.assertEqual(bot.catalog_changes(report(old), report(new)), ([], []))
+        self.assertEqual(bot.change_highlight(report(old), report(new)), (
+            "Novidades:\n- Nenhuma.\n\nEm estoque:\n- A — preço: R$ 50 → R$ 55\n\nSem estoque:\n- Nenhuma."
+        ))
 
     def test_reordering_is_not_a_catalog_change(self):
         old, new = report("A", "B"), report("B", "A")
@@ -71,16 +82,100 @@ class CatalogTests(OfflineTest):
 
     def test_section_options_do_not_include_other_sections(self):
         text = report("A") + "\n== OLEO ==\nopcoes: B | C"
-        self.assertEqual(bot.section_options(text, "FLORES"), ["A"])
+        self.assertEqual(bot.section_options(text, "FLORES"), [label("A")])
 
     def test_current_stock_does_not_claim_any_change(self):
         self.assertEqual(bot.current_catalog_message(report("A", "B")), (
-            "Estoque atual de strains:\n\n- A\n- B"
+            "Estoque atual de strains:\n\n- [R$ 85] — A\n- [R$ 85] — B"
         ))
 
     def test_empty_current_stock_is_not_treated_as_confirmed(self):
         with self.assertRaises(bot.FlowError):
             bot.current_catalog_message(report())
+
+    def test_price_decrease_and_decimal_values(self):
+        message = bot.change_highlight(report("[R$ 95,50] — A"), report("[R$ 85,25] — A"))
+        self.assertIn("A — preço: R$ 95,50 → R$ 85,25", message)
+        self.assertIn("Novidades:\n- Nenhuma.", message)
+        self.assertIn("Sem estoque:\n- Nenhuma.", message)
+
+    def test_mixed_stock_and_price_changes_keep_three_sections(self):
+        old = report("[R$ 90] — A", "B", "Saiu")
+        new = report("[R$ 85] — A", "B", "Nova")
+        message = bot.change_highlight(old, new)
+        self.assertEqual(message, (
+            "Novidades:\n- [R$ 85] — Nova\n\nEm estoque:\n"
+            "- A — preço: R$ 90 → R$ 85\n- [R$ 85] — B\n\nSem estoque:\n- [R$ 85] — Saiu"
+        ))
+
+    def test_formatting_only_changes_are_ignored(self):
+        old = raw_report("[R$ 85] — Strain A (indoor)", "[R$ 50] — Strain B")
+        new = raw_report("[R$ 50,00] – Strain B", "[R$ 85.00] - STRAIN   A (indoor)")
+        self.assertTrue(bot.only_flower_order_changed(old, new))
+        self.assertEqual(bot.catalog_changes(old, new), ([], []))
+        self.assertEqual(bot.catalog_price_changes(old, new), {})
+
+    def test_variant_changes_are_real_stock_changes(self):
+        old = report("Strain A (indoor)")
+        new = report("Strain A (outdoor)")
+        self.assertEqual(bot.catalog_changes(old, new), (
+            [label("Strain A (outdoor)")], [label("Strain A (indoor)")],
+        ))
+
+    def test_price_marker_disappears_on_next_stock_change(self):
+        first = report("[R$ 85] — A")
+        second = report("[R$ 90] — A")
+        third = report("[R$ 90] — A", "B")
+        self.assertIn("preço:", bot.change_highlight(first, second))
+        self.assertNotIn("preço:", bot.change_highlight(second, third))
+
+
+class ProductValidationTests(OfflineTest):
+    def test_known_navigation_is_not_stock(self):
+        items = ["⬅️ Voltar", "THC", "CBD", "Menu principal", "Óleos", label("A")]
+        products = bot.parse_flower_options(items)
+        self.assertEqual(list(products), ["a"])
+        self.assertNotIn("Voltar", bot.current_catalog_message(raw_report(*items)))
+
+    def test_menu_only_screen_is_rejected(self):
+        for items in (["THC", "Voltar"], ["Flores", "Óleos"], [], ["Voltar ao início"]):
+            with self.subTest(items=items), self.assertRaises(bot.FlowError):
+                bot.parse_flower_options(items)
+
+    def test_one_unknown_option_invalidates_whole_catalog(self):
+        with self.assertRaises(bot.FlowError):
+            bot.parse_flower_options([label("A"), "Produto com novo formato"])
+
+    def test_malformed_product_labels_rejected(self):
+        for item in ("A", "[R$ 0] — A", "[R$ -5] — A", "[R$ 85] — ",
+                     "[R$ 85] — THC", "[R$ 85] — Voltar", "[R$ 85] — 123",
+                     "[R$ 85,5] — A", "[R$ abc] — A", "[R$ 8.5.00] — A", None):
+            with self.subTest(item=item), self.assertRaises(bot.FlowError):
+                bot.parse_flower_options([item])
+
+    def test_supported_prices_use_integer_cents(self):
+        for value, expected in (("85", 8500), ("85,00", 8500), ("85.00", 8500),
+                                ("85,50", 8550), ("1.250", 125000), ("1.250,50", 125050)):
+            with self.subTest(value=value):
+                products = bot.parse_flower_options(["[R$ %s] — A" % value])
+                self.assertEqual(products["a"].price_cents, expected)
+        self.assertEqual(bot.format_price(125050), "R$ 1.250,50")
+
+    def test_duplicate_names_with_conflicting_prices_rejected(self):
+        with self.assertRaises(bot.FlowError):
+            bot.parse_flower_options(["[R$ 85] — A", "[R$ 90] — a"])
+
+    def test_different_sizes_and_growing_types_are_distinct(self):
+        products = bot.parse_flower_options([
+            label("A (indoor)"), label("A (outdoor)"), label("A (flores pequenas)"),
+        ])
+        self.assertEqual(len(products), 3)
+
+    def test_unicode_whitespace_and_composition_normalized(self):
+        products = bot.parse_flower_options([
+            "[R$\u00a085] — Açúcar (indoor)", "[R$ 85,00] — AC\u0327U\u0301CAR   (indoor)",
+        ])
+        self.assertEqual(len(products), 1)
 
 
 class NotificationTests(OfflineTest):
@@ -192,12 +287,43 @@ class NavigationTests(OfflineTest):
         responses = [
             dict(self.buttons("Sou paciente"), sessionId="test-session"),
             {"input": {"type": "text input"}}, self.buttons("Flores"),
-            self.buttons("Strain A"),
+            self.buttons(label("Strain A")),
         ]
         with mock.patch("bot.discover_typebot", return_value="test-bot"), \
              mock.patch("bot.post_json", side_effect=responses):
             result = bot.collect("00000000000")
-        self.assertEqual(bot.section_options(result, "FLORES"), ["Strain A"])
+        self.assertEqual(bot.section_options(result, "FLORES"), [label("Strain A")])
+
+    def test_thc_in_product_name_does_not_select_the_product(self):
+        responses = [
+            dict(self.buttons("Sou paciente"), sessionId="test-session"),
+            {"input": {"type": "text input"}}, self.buttons("Flores"),
+            self.buttons(label("THC Bomb (indoor)")),
+        ]
+        with mock.patch("bot.discover_typebot", return_value="test-bot"), \
+             mock.patch("bot.post_json", side_effect=responses) as post:
+            result = bot.collect("00000000000")
+        self.assertEqual(post.call_count, 4)
+        self.assertEqual(bot.section_options(result, "FLORES"), [label("THC Bomb (indoor)")])
+
+    def test_menu_after_thc_is_rejected_before_saving_catalog(self):
+        responses = [
+            dict(self.buttons("Sou paciente"), sessionId="test-session"),
+            {"input": {"type": "text input"}}, self.buttons("Flores"),
+            self.buttons("THC", "CBD"), self.buttons("THC", "Voltar"),
+        ]
+        with mock.patch("bot.discover_typebot", return_value="test-bot"), \
+             mock.patch("bot.post_json", side_effect=responses):
+            with self.assertRaises(bot.FlowError):
+                bot.collect("00000000000")
+
+    def test_malformed_typebot_items_raise_flow_error(self):
+        for payload in ("unexpected", {"items": None}, {"items": ["text"]}, {"items": [{"content": 123}]}):
+            with self.subTest(payload=payload):
+                chat = object.__new__(bot.Chat)
+                chat.last = {"input": payload}
+                with self.assertRaises(bot.FlowError):
+                    _ = chat.items
 
 
 class StateFixture(OfflineTest):
@@ -300,7 +426,7 @@ class CycleTests(StateFixture):
         self.assertFalse(self.cycle())
         body = self.notify.call_args.args[2]
         self.assertIn("strains de flores continuam iguais", body)
-        self.assertIn("Em estoque:\n- A\n- B", body)
+        self.assertIn("Em estoque:\n- [R$ 85] — A\n- [R$ 85] — B", body)
         self.assertNotIn("opcoes:", body)
 
     def test_failure_alert_is_persisted_across_independent_cycles(self):
@@ -360,7 +486,7 @@ class CycleTests(StateFixture):
              mock.patch("sys.argv", ["bot.py", "--notify-current", "--state", str(self.state_path)]):
             bot.main()
         self.assertEqual(self.state_path.read_bytes(), original)
-        self.assertEqual(self.notify.call_args.args[2], "Estoque atual de strains:\n\n- Nova")
+        self.assertEqual(self.notify.call_args.args[2], "Estoque atual de strains:\n\n- " + label("Nova"))
 
     def test_dry_run_has_no_notification_or_write(self):
         original = self.state_path.read_bytes()
@@ -390,7 +516,7 @@ class CycleTests(StateFixture):
         self.assertFalse(self.cycle())
         self.assertEqual(self.notify.call_count, 2)
         self.assertEqual(self.notify.call_args_list[0].args[1], "abecmed-watch voltou")
-        self.assertIn("Novidades:\n- C", self.notify.call_args_list[1].args[2])
+        self.assertIn("Novidades:\n- " + label("C"), self.notify.call_args_list[1].args[2])
         self.assertEqual(bot.load_state(self.state_path)["report"], report("B", "C"))
 
     def test_notification_failure_exits_with_error(self):
@@ -401,6 +527,56 @@ class CycleTests(StateFixture):
             with self.assertRaises(SystemExit) as raised:
                 bot.main()
         self.assertEqual(raised.exception.code, 1)
+
+    def test_menu_cannot_overwrite_good_baseline(self):
+        self.collect.return_value = raw_report("THC", "Voltar")
+        self.assertTrue(self.cycle())
+        self.assertEqual(self.notify.call_args.args[1], "abecmed-watch quebrou")
+        self.assertNotIn("Novidades:", self.notify.call_args.args[2])
+        self.assertEqual(bot.load_state(self.state_path)["report"], self.old)
+
+    def test_partial_unknown_catalog_cannot_produce_false_removal(self):
+        self.collect.return_value = raw_report(label("A"), "Novo formato de B")
+        self.assertTrue(self.cycle())
+        self.assertEqual(bot.load_state(self.state_path)["report"], self.old)
+        self.assertEqual(self.notify.call_args.args[1], "abecmed-watch quebrou")
+
+    def test_bad_legacy_baseline_gets_snapshot_not_false_changes(self):
+        bot.save_state(self.state_path, {"report": raw_report("THC", "Voltar")})
+        self.assertFalse(self.cycle())
+        self.assertEqual(self.notify.call_args.args[1], "ABECMED: estoque revalidado")
+        self.assertNotIn("Novidades:", self.notify.call_args.args[2])
+        self.assertEqual(bot.load_state(self.state_path)["report"], self.old)
+
+    def test_bad_legacy_baseline_preserved_until_snapshot_is_accepted(self):
+        bot.save_state(self.state_path, {"report": raw_report("THC", "Voltar")})
+        original = self.state_path.read_bytes()
+        self.notify.side_effect = bot.FlowError("ntfy indisponivel")
+        with self.assertRaises(bot.FlowError):
+            self.cycle()
+        self.assertEqual(self.state_path.read_bytes(), original)
+
+    def test_price_only_change_is_not_reported_as_stock_or_text_change(self):
+        self.collect.return_value = report("[R$ 90] — A", "B")
+        self.assertFalse(self.cycle())
+        message = self.notify.call_args.args[2]
+        self.assertIn("Em estoque:\n- A — preço: R$ 85 → R$ 90", message)
+        self.assertIn("Novidades:\n- Nenhuma.", message)
+        self.assertIn("Sem estoque:\n- Nenhuma.", message)
+        self.assertNotIn("Mudou o texto", message)
+        self.notify.reset_mock()
+        self.assertFalse(self.cycle())
+        self.notify.assert_not_called()
+
+    def test_manual_invalid_stock_is_not_notified(self):
+        original = self.state_path.read_bytes()
+        self.collect.return_value = raw_report("THC", "Voltar")
+        with mock.patch.dict("os.environ", {"ABECMED_CPF": "00000000000", "NTFY_TOPIC": "test-topic"}), \
+             mock.patch("sys.argv", ["bot.py", "--notify-current", "--state", str(self.state_path)]):
+            with self.assertRaises(SystemExit):
+                bot.main()
+        self.notify.assert_not_called()
+        self.assertEqual(self.state_path.read_bytes(), original)
 
 
 if __name__ == "__main__":

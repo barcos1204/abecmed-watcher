@@ -2,10 +2,9 @@ name: check
 
 on:
   schedule:
-    # A cada 10 min. O cron do Actions nao aceita intervalo sorteado, entao o
-    # jitter abaixo espalha o horario. Para intervalo aleatorio de verdade,
-    # use ./run.sh --loop numa maquina sua.
-    - cron: "*/10 * * * *"
+    # Mantem 6 consultas/hora solicitadas, fora do inicio da hora e dos multiplos
+    # de 10 mais concorridos. O GitHub ainda pode atrasar ou descartar disparos.
+    - cron: "7,17,27,37,47,57 * * * *"
   workflow_dispatch:
     inputs:
       notify_current:
@@ -20,6 +19,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   check:
@@ -28,11 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # Esperar antes do checkout evita coletar usando um estado antigo.
-      - name: Jitter
-        if: github.event_name == 'schedule'
-        run: sleep $((RANDOM % 300))
-
       - uses: actions/checkout@v7
         with:
           ref: main
@@ -58,3 +53,12 @@ jobs:
         # Persiste tambem o aviso de falha, sem esconder o erro da etapa Rodar.
         if: ${{ !cancelled() && (steps.monitor.outcome == 'success' || steps.monitor.outcome == 'failure') }}
         run: bash scripts/save-state.sh
+
+      # Diagnostico depois da consulta para nao atrasar o aviso de estoque.
+      # Mede disparos registrados, nao e um vigia independente do agendador.
+      - name: Diagnosticar intervalo do agendamento
+        if: ${{ !cancelled() && github.event_name == 'schedule' && steps.monitor.outcome != 'skipped' }}
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_schedule.py

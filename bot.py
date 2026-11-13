@@ -7,8 +7,8 @@ de conversa como se fosse um navegador, junta o texto das telas de
 produto num relatorio, e compara com a execucao anterior. Se mudou,
 notifica via ntfy.sh.
 
-Compara as opcoes de flores sem interpretar nome/preco. Mudancas apenas
-na ordem das strains nao geram notificacao.
+Valida as opcoes de flores e compara nome/variante separadamente do preco.
+Mudancas apenas na ordem ou na formatacao das strains nao geram notificacao.
 
 Configuracao, em ordem de prioridade:
     1. variaveis de ambiente ABECMED_CPF e NTFY_TOPIC (usado no GitHub Actions)
@@ -21,6 +21,7 @@ Uso:
 
 import argparse
 import configparser
+from dataclasses import dataclass
 import gzip
 import json
 import os
@@ -29,6 +30,7 @@ import re
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 
@@ -211,6 +213,8 @@ class Chat:
             {"isStreamEnabled": False, "prefilledVariables": {}, "isOnlyRegistering": False},
             headers={"Origin": BASE, "Referer": BASE + "/"},
         )
+        if not isinstance(self.last, dict):
+            raise FlowError("startChat devolveu uma resposta invalida")
         self.session_id = self.last.get("sessionId")
         if not self.session_id:
             raise FlowError("startChat nao devolveu sessionId")
@@ -218,11 +222,22 @@ class Chat:
     @property
     def items(self):
         payload = self.last.get("input") or {}
-        return [i.get("content", "") for i in payload.get("items", [])]
+        if not isinstance(payload, dict):
+            raise FlowError("input do Typebot invalido")
+        items = payload.get("items", [])
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("content"), str)
+            for item in items
+        ):
+            raise FlowError("opcoes do Typebot invalidas")
+        return [item["content"] for item in items]
 
     @property
     def input_type(self):
-        return (self.last.get("input") or {}).get("type")
+        payload = self.last.get("input") or {}
+        if not isinstance(payload, dict):
+            raise FlowError("input do Typebot invalido")
+        return payload.get("type")
 
     @property
     def text(self):
@@ -234,6 +249,8 @@ class Chat:
             {"message": {"type": "text", "text": text}},
             headers={"Origin": BASE, "Referer": BASE + "/"},
         )
+        if not isinstance(self.last, dict):
+            raise FlowError("continueChat devolveu uma resposta invalida")
         return self.last
 
     def pick(self, pattern, required=True):
@@ -317,10 +334,13 @@ def collect(cpf):
 
     # O BOT ABECMED 2.1 adicionou uma etapa de composto antes do catalogo.
     # So depois de escolher THC as strains disponiveis sao exibidas.
-    if any(re.search(r"\bTHC\b", i, re.I) for i in chat.items):
-        chat.pick(r"\bTHC\b")
+    compound = next((item for item in chat.items if choice_key(item) in THC_CHOICES), None)
+    if compound is not None:
+        # Nao selecionar acidentalmente uma strain chamada, por exemplo, THC Bomb.
+        chat.send(compound)
 
-    sections.append(("FLORES", chat.text, chat.items))
+    flowers = parse_flower_options(chat.items)
+    sections.append(("FLORES", chat.text, [flower.label for flower in flowers.values()]))
     chat.pick(r"voltar|in[íi]cio", required=False)
 
     # --- concentrados
@@ -414,8 +434,99 @@ def section_options(report, title):
     return []
 
 
+# ------------------------------------------------------- produtos e precos
+
+
+THC_CHOICES = {"thc", "flores thc", "flores de thc"}
+NAVIGATION_CHOICES = THC_CHOICES | {
+    "cbd", "flores cbd", "flores de cbd", "voltar", "inicio", "menu",
+    "menu principal", "voltar ao menu", "voltar ao menu principal",
+    "voltar para o menu", "voltar para o menu principal", "voltar ao inicio",
+    "flores", "oleos", "concentrados", "saber status do pedido",
+}
+PRODUCT_LABEL = re.compile(
+    r"^\[\s*R\$\s*(?P<price>(?:\d{1,3}(?:\.\d{3})+(?:,\d{2})?|"
+    r"\d+(?:[,.]\d{2})?))\s*\]\s*[-–—]\s*(?P<name>.+)$", re.I,
+)
+
+
+def normalized_text(text):
+    return " ".join(unicodedata.normalize("NFKC", text).split())
+
+
+def choice_key(text):
+    """Identifica somente botoes completos; nao busca palavras dentro de strains."""
+    text = unicodedata.normalize("NFKD", normalized_text(text).casefold())
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"^\W+|\W+$", "", text).strip()
+
+
+@dataclass(frozen=True)
+class Flower:
+    label: str
+    name: str
+    price_cents: int
+
+    @property
+    def key(self):
+        # Mantem qualificadores: indoor, outdoor e flores pequenas sao variantes.
+        return normalized_text(self.name).casefold()
+
+
+def parse_price(text):
+    """Converte o valor ja validado pela regex para centavos inteiros."""
+    if "," in text:
+        whole, fraction = text.replace(".", "").split(",")
+    elif "." in text and len(text.rsplit(".", 1)[1]) == 2:
+        whole, fraction = text.rsplit(".", 1)
+    else:
+        whole, fraction = text.replace(".", ""), "00"
+    return int(whole) * 100 + int(fraction)
+
+
+def format_price(cents):
+    whole, fraction = divmod(cents, 100)
+    value = format(whole, ",").replace(",", ".")
+    return "R$ " + value + (",%02d" % fraction if fraction else "")
+
+
+def parse_flower_options(options):
+    """Aceita apenas produtos reconhecidos, ignorando botoes conhecidos de menu."""
+    flowers = {}
+    for option in options:
+        if not isinstance(option, str):
+            raise FlowError("opcao de flores invalida")
+        label = normalized_text(option)
+        if choice_key(label) in NAVIGATION_CHOICES:
+            continue
+        match = PRODUCT_LABEL.fullmatch(label)
+        if not match:
+            # Nao descartar silenciosamente uma opcao desconhecida: pode ser produto.
+            raise FlowError("formato desconhecido nas opcoes de flores; estoque preservado")
+        name = match.group("name").strip()
+        try:
+            price = parse_price(match.group("price"))
+        except ValueError as exc:
+            raise FlowError("preco de flores invalido; estoque preservado") from exc
+        if price <= 0 or not any(char.isalpha() for char in name) or choice_key(name) in NAVIGATION_CHOICES:
+            raise FlowError("opcao nao reconhecida como produto de flores; estoque preservado")
+        flower = Flower(label=label, name=name, price_cents=price)
+        previous = flowers.get(flower.key)
+        if previous and previous.price_cents != flower.price_cents:
+            raise FlowError("mesma strain/variante com precos diferentes; estoque preservado")
+        flowers.setdefault(flower.key, flower)
+    if not flowers:
+        raise FlowError("o catalogo atual nao trouxe nenhuma strain valida; estoque preservado")
+    return flowers
+
+
+def flower_catalog(report):
+    return parse_flower_options(section_options(report, "FLORES"))
+
+
 def normalize_flower_order(report):
-    """Normaliza somente a ordem das opcoes da secao FLORES."""
+    """Normaliza ordem/formatacao das flores, mantendo texto e outras secoes."""
+    products = flower_catalog(report)
     header = "== FLORES =="
     inside = False
     lines = []
@@ -423,8 +534,9 @@ def normalize_flower_order(report):
         if line.startswith("== "):
             inside = line == header
         if inside and line.startswith("opcoes: "):
-            items = [item.strip() for item in line[8:].split(" | ") if item.strip()]
-            line = "opcoes: " + " | ".join(sorted(items))
+            line = "opcoes: " + json.dumps(sorted(
+                (flower.key, flower.price_cents) for flower in products.values()
+            ), ensure_ascii=False)
         lines.append(line)
     return "\n".join(lines)
 
@@ -440,20 +552,40 @@ def only_flower_order_changed(old, new):
 
 def catalog_changes(old, new):
     """Devolve produtos que entraram e sairam, preservando a ordem do catalogo."""
-    old_items = section_options(old, "FLORES")
-    new_items = section_options(new, "FLORES")
-    old_set = set(old_items)
-    new_set = set(new_items)
-    added = [item for item in new_items if item not in old_set]
-    removed = [item for item in old_items if item not in new_set]
+    old_items = flower_catalog(old)
+    new_items = flower_catalog(new)
+    added = [item.label for key, item in new_items.items() if key not in old_items]
+    removed = [item.label for key, item in old_items.items() if key not in new_items]
     return added, removed
+
+
+def catalog_price_changes(old, new):
+    previous = flower_catalog(old)
+    current = flower_catalog(new)
+    return {
+        key: (previous[key], item)
+        for key, item in current.items()
+        if key in previous and previous[key].price_cents != item.price_cents
+    }
 
 
 def change_highlight(old, new):
     """Tres grupos sem duplicatas, relativos somente a ultima mudanca."""
     added, removed = catalog_changes(old, new)
-    added_set = set(added)
-    kept = [item for item in section_options(new, "FLORES") if item not in added_set]
+    previous = flower_catalog(old)
+    current = flower_catalog(new)
+    price_changes = catalog_price_changes(old, new)
+    kept = []
+    for key, item in current.items():
+        if key not in previous:
+            continue
+        if key in price_changes:
+            before, after = price_changes[key]
+            kept.append("%s — preço: %s → %s" % (
+                after.name, format_price(before.price_cents), format_price(after.price_cents),
+            ))
+        else:
+            kept.append(item.label)
     lines = []
     for title, items in (
         ("Novidades:", added),
@@ -471,12 +603,10 @@ def change_highlight(old, new):
 
 def current_catalog_message(report):
     """Monta uma mensagem com o estoque atual, sem alterar o estado salvo."""
-    items = section_options(report, "FLORES")
-    if not items:
-        raise FlowError("o catalogo atual nao trouxe nenhuma strain")
+    items = flower_catalog(report)
     return "\n".join(
         ["Estoque atual de strains:", ""]
-        + ["- %s" % item for item in dict.fromkeys(items)]
+        + ["- %s" % item.label for item in items.values()]
     )
 
 
@@ -553,6 +683,16 @@ def ciclo(cpf, topic, state_path):
     """Um ciclo completo. True indica falha; o controle de avisos fica no JSON."""
     state = load_state(state_path)
     previous = state.get("report", "")
+    invalid_baseline = False
+    if previous:
+        try:
+            flower_catalog(previous)
+        except FlowError:
+            # Estados antigos podem conter menus aceitos como strains. Nao gerar
+            # entradas/saidas contra essa referencia; substituir so apos envio valido.
+            invalid_baseline = True
+            previous = ""
+            print("referencia anterior sem catalogo valido; sera revalidada", file=sys.stderr)
     try:
         report = collect(cpf)
         # Uma tela incompleta nao pode virar uma falsa remocao de todo o estoque.
@@ -587,16 +727,20 @@ def ciclo(cpf, topic, state_path):
         # estado para acompanhar a ordem atual, mas isso nao e uma novidade real.
         state["report"] = report
         save_state(state_path, state)
-        print("%s  sem mudancas (somente ordem das strains)" % time.strftime("%H:%M"))
+        print("%s  sem mudancas (somente ordem/formatacao das strains)" % time.strftime("%H:%M"))
         return False
 
     if not previous:
-        title = "abecmed-watch ativo"
-        body = "Primeira execucao, sem comparacao anterior.\n\n" + current_catalog_message(report)
+        title = "ABECMED: estoque revalidado" if invalid_baseline else "abecmed-watch ativo"
+        intro = (
+            "Referencia anterior invalida. Estoque revalidado, sem afirmar entradas ou saidas."
+            if invalid_baseline else "Primeira execucao, sem comparacao anterior."
+        )
+        body = intro + "\n\n" + current_catalog_message(report)
         tags = ["seedling"]
     else:
         body = change_highlight(previous, report)
-        if not any(catalog_changes(previous, report)):
+        if not any(catalog_changes(previous, report)) and not catalog_price_changes(previous, report):
             body = (
                 "Mudou o texto ou outra secao do catalogo; as strains de flores continuam iguais.\n\n"
                 + body
