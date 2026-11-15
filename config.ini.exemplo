@@ -1,8 +1,9 @@
 # Copie para config.ini e preencha, ou rode ./configurar.sh (configurar.bat no Windows).
 
 [abecmed]
-cpf = 00000000000
-topico = abecmed-troque-isto
+# Preencha localmente. O configurador pode gerar um topico exclusivo.
+cpf =
+topico =
 
 # Intervalo entre verificacoes no modo --loop, em minutos.
 # O programa sorteia um valor aleatorio entre os dois a cada ciclo.

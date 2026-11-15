@@ -16,6 +16,7 @@ if not exist config.ini (
     echo Ainda nao configurado. Rodando o configurador...
     echo.
     call configurar.bat
+    if errorlevel 1 exit /b 1
 )
 
 python bot.py %*

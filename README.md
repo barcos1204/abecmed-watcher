@@ -17,8 +17,9 @@ já vem de fábrica.
 
 **3. Configure.** Rode `configurar.bat` (Windows, dois cliques) ou
 `./configurar.sh` (Linux/macOS). Ele pede seu CPF de associado e o canal de
-avisos — aperte Enter no canal que ele sorteia um nome seguro. **No fim, abra o
-ntfy, toque no + e assine o nome que ele mostrar.**
+avisos. Na primeira configuração, Enter sorteia um nome com 128 bits aleatórios
+nos dois sistemas, usando o gerador seguro do Python. **No fim, abra o ntfy,
+toque no + e assine o nome que ele mostrar.**
 
 **4. Rode.** `run.bat` ou `./run.sh`. Sem um estado anterior, envia a lista atual.
 Depois disso, só avisa quando há mudança. Como o repositório pode já conter
@@ -51,7 +52,11 @@ intervalo_min = 7
 intervalo_max = 12
 ```
 
-Rodar o configurador de novo é seguro: Enter mantém o valor atual.
+Rodar o configurador de novo e apertar Enter mantém o CPF e o tópico atuais,
+inclusive no Windows. Nenhuma atualização do código troca o seu canal.
+Se quiser trocar, digite outro nome ou `:novo` no campo do tópico para sortear
+um novo. Nesse caso, assine-o no app; se usar o Actions, atualize também o
+secret `NTFY_TOPIC` no GitHub. O configurador só altera o arquivo local.
 
 **Não versione** — tem seu CPF. Já está no `.gitignore`. As variáveis de
 ambiente `ABECMED_CPF` e `NTFY_TOPIC`, se existirem, têm prioridade.
@@ -68,6 +73,11 @@ Sem servidor, sem deixar o PC ligado:
 3. **Settings → Actions → General → Workflow permissions**: marque **Read and write**
    (sem isso falha com 403).
 4. Aba **Actions**, habilite e rode `check` uma vez à mão.
+
+As Actions usadas por esses workflows estão fixadas por SHA. O Dependabot
+pode abrir PRs mensais para atualizar essas versões, sem fazer merge por conta
+própria. Em um fork, confira se **Dependabot version updates** está habilitado
+em **Settings → Advanced Security** ([instruções do GitHub](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/configure-version-updates#enabling-version-updates-on-forks)).
 
 O workflow `check` funciona na branch `main`. Solicita uma execução nos minutos
 7, 17, 27, 37, 47 e 57 de cada hora, sem espera aleatória adicional. Esse
