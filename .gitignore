@@ -1,5 +1,6 @@
 # Contem seu CPF — nunca versionar.
 config.ini
+.abecmed-config-*.tmp
 
 __pycache__/
 *.pyc

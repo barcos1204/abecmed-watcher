@@ -8,6 +8,10 @@ on:
       - 'bot.py'
       - 'tests/**'
       - 'scripts/**'
+      - 'configurar.*'
+      - 'config.ini.exemplo'
+      - 'run*.bat'
+      - '.github/dependabot.yml'
       - '.github/workflows/**'
 
 permissions:
@@ -18,11 +22,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - name: Testes offline (sem CPF, ntfy ou consulta de estoque)
         run: python3 -m unittest discover -s tests -v
+
+  windows-config:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Testar o configurador e o arquivo .bat sem secrets
+        run: python -m unittest discover -s tests -p test_configure.py -v
