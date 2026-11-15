@@ -74,11 +74,11 @@ class CatalogTests(OfflineTest):
 
     def test_reordering_is_not_a_catalog_change(self):
         old, new = report("A", "B"), report("B", "A")
-        self.assertTrue(bot.only_flower_order_changed(old, new))
+        self.assertTrue(bot.only_option_order_changed(old, new))
         self.assertEqual(bot.catalog_changes(old, new), ([], []))
 
     def test_text_change_is_not_mistaken_for_reordering(self):
-        self.assertFalse(bot.only_flower_order_changed(report("A"), report("A", text="Novo aviso")))
+        self.assertFalse(bot.only_option_order_changed(report("A"), report("A", text="Novo aviso")))
 
     def test_section_options_do_not_include_other_sections(self):
         text = report("A") + "\n== OLEO ==\nopcoes: B | C"
@@ -111,7 +111,7 @@ class CatalogTests(OfflineTest):
     def test_formatting_only_changes_are_ignored(self):
         old = raw_report("[R$ 85] — Strain A (indoor)", "[R$ 50] — Strain B")
         new = raw_report("[R$ 50,00] – Strain B", "[R$ 85.00] - STRAIN   A (indoor)")
-        self.assertTrue(bot.only_flower_order_changed(old, new))
+        self.assertTrue(bot.only_option_order_changed(old, new))
         self.assertEqual(bot.catalog_changes(old, new), ([], []))
         self.assertEqual(bot.catalog_price_changes(old, new), {})
 
@@ -393,6 +393,49 @@ class CycleTests(StateFixture):
         self.assertFalse(self.cycle())
         self.notify.assert_not_called()
         self.assertEqual(bot.load_state(self.state_path)["report"], report("B", "A"))
+
+    def test_only_button_order_changes_in_each_section_or_all_at_once(self):
+        buttons = {"MENU": ["Óleos", "Flores", "Saber status"],
+                   "FLORES": [label("A"), label("B")],
+                   "CONCENTRADOS": ["Extrato", "Óleo"], "OLEO": ["Óleo A", "Óleo B"]}
+        baseline = bot.render([(name, "", items) for name, items in buttons.items()])
+        for sections in [*[{name} for name in buttons], set(buttons)]:
+            with self.subTest(sections=sections):
+                bot.save_state(self.state_path, {"report": baseline})
+                reordered = bot.render([
+                    (name, "", items[::-1] if name in sections else items)
+                    for name, items in buttons.items()
+                ])
+                self.collect.return_value = reordered
+                self.assertFalse(self.cycle())
+                self.notify.assert_not_called()
+                # A ordem recebida continua disponivel para relatorios e envios manuais.
+                self.assertEqual(bot.load_state(self.state_path)["report"], reordered)
+
+    def test_real_changes_are_not_hidden_by_menu_reordering(self):
+        baseline = self.old + "\n\n== OLEO ==\nopcoes: Gotas A | Gotas B"
+        reordered = baseline.replace("Óleos | Flores", "Flores | Óleos")
+        for before, after in [
+            ("Gotas A | Gotas B", "Gotas A"), ("Gotas A | Gotas B", "Gotas B | Gotas A | Gotas C"),
+            ("Gotas A | Gotas B", "Gotas B | Gotas A | Gotas A"), ("Gotas B", "Gotas B 30 ml"),
+            ("Produtos disponíveis", "Novo aviso"), (label("A"), "[R$ 90] — A"),
+        ]:
+            with self.subTest(after=after):
+                self.notify.reset_mock()
+                bot.save_state(self.state_path, {"report": baseline})
+                self.collect.return_value = reordered.replace(before, after)
+                self.assertFalse(self.cycle())
+                self.notify.assert_called_once()
+
+    def test_section_order_and_prose_are_not_button_order(self):
+        flowers = ("FLORES", "", [label("A")])
+        menu = ("MENU", "", ["Flores"])
+        self.assertFalse(bot.only_option_order_changed(
+            bot.render([menu, flowers]), bot.render([flowers, menu])
+        ))
+        before = bot.render([flowers, ("OLEO", "opcoes: A | B", ["Gotas A", "Gotas B"])])
+        after = before.replace("opcoes: A | B", "opcoes: B | A")
+        self.assertFalse(bot.only_option_order_changed(before, after))
 
     def test_stock_change_saved_after_notification(self):
         self.collect.return_value = report("B", "C")

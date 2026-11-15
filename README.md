@@ -158,10 +158,11 @@ indoor, outdoor e flores pequenas não são agrupados como o mesmo produto.
 Uma renomeação real ainda pode aparecer como saída e entrada, pois não há um
 identificador estável de produto exposto nesse formato.
 
-Preços são comparados em centavos inteiros. Mudanças apenas de ordem, espaços,
-maiúsculas/minúsculas ou formatação equivalente de preço não geram aviso.
-Uma alteração no texto ou em outra seção ainda gera um aviso, informando que
-as opções de flores continuam iguais, sem repetir menus e instruções.
+Trocar apenas a ordem dos botões de uma seção (menu, flores, concentrados ou
+óleo) não gera aviso; o relatório mantém a ordem recebida. Para flores, espaços,
+maiúsculas/minúsculas e preços equivalentes em centavos também são ignorados.
+Uma opção adicionada/removida ou uma mudança no texto de outra seção continua
+gerando aviso, sem repetir menus e instruções.
 
 Botões conhecidos como `THC`, `CBD`, `Voltar` e `Menu principal` não entram na
 lista. Uma tela só de menu, opção desconhecida ou mesma strain/variante com
