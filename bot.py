@@ -8,7 +8,7 @@ produto num relatorio, e compara com a execucao anterior. Se mudou,
 notifica via ntfy.sh.
 
 Valida as opcoes de flores e compara nome/variante separadamente do preco.
-Mudancas apenas na ordem ou na formatacao das strains nao geram notificacao.
+Mudar apenas a ordem dos botoes em qualquer secao nao gera notificacao.
 
 Configuracao, em ordem de prioridade:
     1. variaveis de ambiente ABECMED_CPF e NTFY_TOPIC (usado no GitHub Actions)
@@ -421,16 +421,32 @@ def save_state(path, state):
             os.unlink(temporary)
 
 
+OPTIONS_PREFIX = "opcoes: "
+
+
+def option_rows(lines):
+    """render() coloca os botoes na ultima linha nao vazia de cada secao."""
+    section = row = None
+    for index, line in enumerate(lines):
+        if line.startswith("== ") and line.endswith(" =="):
+            if row is not None:
+                yield section, row
+            section, row = line[3:-3], None
+        elif section is not None and line.strip():
+            row = index if line.startswith(OPTIONS_PREFIX) else None
+    if row is not None:
+        yield section, row
+
+
+def split_options(line):
+    return [item.strip() for item in line[len(OPTIONS_PREFIX):].split(" | ") if item.strip()]
+
+
 def section_options(report, title):
-    """Extrai as opcoes de uma secao renderizada do relatorio."""
-    header = "== %s ==" % title
-    inside = False
-    for line in report.splitlines():
-        if line.startswith("== "):
-            inside = line == header
-            continue
-        if inside and line.startswith("opcoes: "):
-            return [item.strip() for item in line[8:].split(" | ") if item.strip()]
+    lines = report.splitlines()
+    for section, row in option_rows(lines):
+        if section == title:
+            return split_options(lines[row])
     return []
 
 
@@ -524,30 +540,26 @@ def flower_catalog(report):
     return parse_flower_options(section_options(report, "FLORES"))
 
 
-def normalize_flower_order(report):
-    """Normaliza ordem/formatacao das flores, mantendo texto e outras secoes."""
-    products = flower_catalog(report)
-    header = "== FLORES =="
-    inside = False
-    lines = []
-    for line in report.splitlines():
-        if line.startswith("== "):
-            inside = line == header
-        if inside and line.startswith("opcoes: "):
-            line = "opcoes: " + json.dumps(sorted(
-                (flower.key, flower.price_cents) for flower in products.values()
-            ), ensure_ascii=False)
-        lines.append(line)
+def normalize_option_order(report):
+    """Chave de comparacao: ordena so os botoes, nunca o relatorio salvo/exibido."""
+    lines = report.splitlines()
+    for section, row in option_rows(lines):
+        items = split_options(lines[row])
+        if section == "FLORES":
+            products = parse_flower_options(items)
+            values = sorted((flower.key, flower.price_cents) for flower in products.values())
+        else:
+            # Lista (nao set): remover/acrescentar um botao repetido continua visivel.
+            values = sorted(items)
+        lines[row] = OPTIONS_PREFIX + json.dumps(values, ensure_ascii=False)
     return "\n".join(lines)
 
 
-def only_flower_order_changed(old, new):
-    """Indica que o relatorio mudou apenas porque as flores foram reordenadas."""
-    old_items = section_options(old, "FLORES")
-    new_items = section_options(new, "FLORES")
-    if not old_items or not new_items:
+def only_option_order_changed(old, new):
+    """Ignora reordenacao de botoes e formatacoes equivalentes das flores."""
+    if not section_options(old, "FLORES") or not section_options(new, "FLORES"):
         return False
-    return normalize_flower_order(old) == normalize_flower_order(new)
+    return normalize_option_order(old) == normalize_option_order(new)
 
 
 def catalog_changes(old, new):
@@ -722,12 +734,11 @@ def ciclo(cpf, topic, state_path):
         print("%s  sem mudancas" % time.strftime("%H:%M"))
         return False
 
-    if previous and only_flower_order_changed(previous, report):
-        # O Typebot pode devolver os mesmos produtos em outra ordem. Atualizamos o
-        # estado para acompanhar a ordem atual, mas isso nao e uma novidade real.
+    if previous and only_option_order_changed(previous, report):
+        # Mantem a ordem original do Typebot no estado e nas consultas manuais.
         state["report"] = report
         save_state(state_path, state)
-        print("%s  sem mudancas (somente ordem/formatacao das strains)" % time.strftime("%H:%M"))
+        print("%s  sem mudancas (ordem dos botoes ou formatacao das flores)" % time.strftime("%H:%M"))
         return False
 
     if not previous:
